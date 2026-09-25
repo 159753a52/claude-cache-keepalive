@@ -125,6 +125,27 @@ function lastUsage(p) {
   } catch { return {}; }
 }
 
+// Pings since the last real user prompt, counted from the transcript. It
+// doesn't depend on hook state, so the loop cap holds even if state is reset.
+function recentPings(p) {
+  try {
+    const size = transcriptSize(p);
+    if (!size) return 0;
+    const len = Math.min(size, 4 * 1024 * 1024);
+    const lines = readRange(p, size - len, len).split('\n');
+    let n = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+      if (o.type !== 'user' || o.isSidechain || o.isMeta || !o.message) continue;
+      const c = o.message.content;
+      if (Array.isArray(c) && c.some(x => x && x.type === 'tool_result')) continue;
+      if ((typeof c === 'string' ? c : JSON.stringify(c)).includes(MESSAGE)) n++;
+      else return n;
+    }
+    return n;
+  } catch { return 0; }
+}
+
 function claudeAlive() {
   const pid = Number(process.env.CLAUDE_PID);
   if (!pid) return true;
@@ -141,7 +162,8 @@ async function onStop(input) {
   pruneStale();
   const prev = loadState(sid) || { count: 0 };
   // A Stop right after our own ping keeps counting; any other turn starts fresh.
-  const count = prev.pinged ? prev.count : 0;
+  // The transcript count backs up the state, which a prompt hook may reset.
+  const count = Math.max(prev.pinged ? prev.count : 0, recentPings(input.transcript_path));
   if (count >= MAX_LOOPS) {
     log(sid, `reached max loops (${count}/${MAX_LOOPS}), keepalive stops`);
     saveState(sid, { count, gen: prev.gen, pinged: false });
@@ -176,7 +198,7 @@ async function onStop(input) {
     log(sid, 'conversation moved on while waiting, skip ping');
     return 0;
   }
-  saveState(sid, { count: count + 1, gen, pinged: true });
+  saveState(sid, { count: count + 1, gen, pinged: true, pingedAt: Date.now() });
   log(sid, `ping ${count + 1}/${MAX_LOOPS}`);
   process.stderr.write(MESSAGE);
   return 2;
@@ -184,7 +206,14 @@ async function onStop(input) {
 
 function onPrompt(input) {
   const sid = input.session_id;
-  if (!sid || !loadState(sid)) return 0;
+  const state = sid && loadState(sid);
+  if (!state) return 0;
+  // Our own ping comes back through UserPromptSubmit as a task notification.
+  // Resetting on it would restart the count after every ping.
+  const text = typeof input.prompt === 'string' && input.prompt ? input.prompt : null;
+  const ownPing = state.pinged &&
+    (text !== null ? text.includes(MESSAGE) : Date.now() - (state.pingedAt || 0) < 120 * 1000);
+  if (ownPing) return 0;
   saveState(sid, { count: 0, gen: crypto.randomUUID(), pinged: false });
   return 0;
 }

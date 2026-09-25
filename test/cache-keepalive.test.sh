@@ -70,4 +70,20 @@ fixture 1h 200000; rm -f "$D/$SID.json"
 IN "" | env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL CLAUDE_CODE_ENTRYPOINT=cli node "$S" stop 2>/dev/null
 check "T17 subscription CLI pings" "$?|$(st)" "2|1,true"
 
+# The rewake comes back through UserPromptSubmit; it must not reset the count.
+PING="test ping message"
+echo "{\"count\":1,\"gen\":\"g\",\"pinged\":true,\"pingedAt\":$(date +%s)000}" > "$D/$SID.json"
+IN ",\"prompt\":\"<system-reminder>Stop hook blocking error: $PING</system-reminder>\"" | CCKA_MESSAGE="$PING" node "$S" prompt
+check "T18 own ping via UserPromptSubmit keeps count" "$?|$(st)" "0|1,true"
+IN "" | CCKA_MESSAGE="$PING" node "$S" prompt
+check "T18b prompt without text right after a ping keeps count" "$?|$(st)" "0|1,true"
+IN ',"prompt":"a real question"' | CCKA_MESSAGE="$PING" node "$S" prompt
+check "T19 real prompt after ping resets" "$?|$(st)" "0|0,false"
+# The cap holds from the transcript even when state was reset.
+fixture 1h 200000
+for i in 1 2 3; do printf '{"type":"user","message":{"role":"user","content":"<system-reminder>%s</system-reminder>"}}\n' "$PING" >> "$T"; done
+echo '{"count":0,"gen":"g","pinged":false}' > "$D/$SID.json"
+t0=$(date +%s); IN "" | CCKA_MESSAGE="$PING" node "$S" stop; rc=$?; dt=$(( $(date +%s) - t0 ))
+check "T20 transcript pings enforce the cap" "$rc|$(logged 'reached max loops (3/3)')|$([ $dt -le 1 ] && echo fast)" "0|2|fast"
+
 echo "== $pass passed, $fail failed"; echo "== log"; cat "$D/keepalive.log"; rm -rf "$D"
